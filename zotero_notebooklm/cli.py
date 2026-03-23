@@ -30,10 +30,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from pyzotero import zotero
 
-# Load credentials: local .env takes priority, global config is fallback
-load_dotenv()
-load_dotenv(Path.home() / ".zotero_notebooklm" / ".env")
-
 GLOBAL_CONFIG_DIR = Path.home() / ".zotero_notebooklm"
 SKILL_DEST = Path.home() / ".claude" / "skills" / "zotero-notebooklm.md"
 SKILL_SRC = Path(__file__).parent.parent / "skill.md"
@@ -427,6 +423,12 @@ def main():
     parser.add_argument("--zotero-dir", help="Path to Zotero storage folder (overrides auto-detection)")
 
     args = parser.parse_args()
+
+    # Load credentials here (not at module level) so the Windows .exe launcher
+    # doesn't interfere with cwd-based .env discovery.
+    # Local .env takes priority; global config is fallback.
+    load_dotenv()
+    load_dotenv(Path.home() / ".zotero_notebooklm" / ".env")
 
     # Route named subcommands
     if args.command == "skill":
