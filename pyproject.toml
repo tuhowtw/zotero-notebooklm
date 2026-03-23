@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "zotero-notebooklm"
+version = "0.1.0"
+description = "Export Zotero collections to Google NotebookLM"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "pyzotero>=1.5",
+    "python-dotenv>=1.0",
+    "notebooklm-py",
+]
+
+[project.scripts]
+zotero-notebooklm = "zotero_notebooklm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zotero_notebooklm*"]
+
+[tool.setuptools.package-data]
+zotero_notebooklm = []
