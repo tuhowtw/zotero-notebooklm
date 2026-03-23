@@ -27,7 +27,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from pyzotero import zotero
 
 GLOBAL_CONFIG_DIR = Path.home() / ".zotero_notebooklm"
@@ -177,9 +177,18 @@ def create_notebook(col_name):
 # ---------------------------------------------------------------------------
 
 def get_default_zotero_storage_dir():
+    """Return the Zotero storage directory, trying known locations in order."""
+    candidates = [
+        Path.home() / "Zotero" / "storage",  # current default (Zotero 7+)
+    ]
     if sys.platform == "win32":
-        return Path(os.environ.get("APPDATA", "")) / "Zotero" / "Zotero" / "storage"
-    return Path.home() / "Zotero" / "storage"
+        candidates.append(
+            Path(os.environ.get("APPDATA", "")) / "Zotero" / "Zotero" / "storage"
+        )
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]  # return preferred default even if not found
 
 
 def find_local_pdf(item_key, storage_dir):
@@ -299,13 +308,26 @@ def cmd_config():
     api_key = input("Zotero API Key: ").strip()
     library_type = input("Library type [user/group] (default: user): ").strip() or "user"
 
-    env_path.write_text(
+    default_storage = get_default_zotero_storage_dir()
+    print(f"\nZotero data directory (the folder shown in Zotero → Edit → Preferences → Advanced)")
+    print(f"  Auto-detected: {default_storage.parent}")
+    data_dir_input = input("  Press Enter to accept, or type a custom path: ").strip()
+
+    if data_dir_input:
+        storage_dir = str(Path(data_dir_input) / "storage")
+    else:
+        storage_dir = str(default_storage)
+
+    lines = (
         f"ZOTERO_LIBRARY_ID={library_id}\n"
         f"ZOTERO_API_KEY={api_key}\n"
         f"ZOTERO_LIBRARY_TYPE={library_type}\n"
+        f"ZOTERO_DATA_DIR={storage_dir}\n"
     )
+    env_path.write_text(lines)
     os.chmod(env_path, 0o600)
     print(f"\nCredentials saved to {env_path} (permissions: 600)")
+    print(f"Zotero storage dir: {storage_dir}")
 
 
 def cmd_skill_install():
@@ -427,8 +449,9 @@ def main():
     # Load credentials here (not at module level) so the Windows .exe launcher
     # doesn't interfere with cwd-based .env discovery.
     # Local .env takes priority; global config is fallback.
-    load_dotenv()
-    load_dotenv(Path.home() / ".zotero_notebooklm" / ".env")
+    # find_dotenv(usecwd=True) searches upward from os.getcwd(), not the module file
+    load_dotenv(find_dotenv(usecwd=True), encoding="utf-8")
+    load_dotenv(Path.home() / ".zotero_notebooklm" / ".env", encoding="utf-8")
 
     # Route named subcommands
     if args.command == "skill":
@@ -447,7 +470,14 @@ def main():
 
     storage_dir_env = os.environ.get("ZOTERO_DATA_DIR")
     storage_dir = args.zotero_dir or storage_dir_env or str(get_default_zotero_storage_dir())
-    if not Path(storage_dir).exists():
+    # If the path points to the Zotero data root (not the storage subfolder), auto-append 'storage'
+    storage_path = Path(storage_dir)
+    if storage_path.exists() and not storage_path.name == "storage":
+        candidate = storage_path / "storage"
+        if candidate.exists():
+            storage_dir = str(candidate)
+            storage_path = candidate
+    if not storage_path.exists():
         print(f"Note: local Zotero storage not found at '{storage_dir}' — local fallback disabled.")
         storage_dir = None
 
