@@ -25,7 +25,7 @@ pip install zotero-notebooklm
 Or from source:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/zotero-notebooklm
+git clone https://github.com/tuhowtw/zotero-notebooklm
 cd zotero-notebooklm
 pip install -e .
 ```
