@@ -114,7 +114,7 @@ zotero-notebooklm skill install
 ```
 
 After installing, Claude Code will understand requests like:
-- *"Export my Piracy collection to NotebookLM"*
+- *"Export my Creative Industry Econ collection to NotebookLM"*
 - *"Create a notebook from my Zotero Economics collection"*
 
 ## Credential Safety Summary
