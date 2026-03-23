@@ -4,11 +4,13 @@ zotero-notebooklm
 Export PDFs from a Zotero collection to a Google NotebookLM notebook.
 
 Usage:
-    zotero-notebooklm                          # list all collections
+    zotero-notebooklm                          # list collections paired with notebooks
     zotero-notebooklm "Collection Name"        # export collection → new notebook
-    zotero-notebooklm "Collection Name" --notebook <id>  # add to existing notebook
-    zotero-notebooklm --zotero-dir /path/to/storage      # override local storage path
+    zotero-notebooklm "Collection Name" --sync # add only new papers to existing notebook
+    zotero-notebooklm "Collection Name" --notebook <id>  # target a specific notebook
+    zotero-notebooklm --zotero-dir /path       # override local storage path
     zotero-notebooklm skill install            # install Claude Code skill
+    zotero-notebooklm config                   # set up global credentials
 
 Credentials are read from (in priority order):
   1. Environment variables
@@ -36,6 +38,8 @@ GLOBAL_CONFIG_DIR = Path.home() / ".zotero_notebooklm"
 SKILL_DEST = Path.home() / ".claude" / "skills" / "zotero-notebooklm.md"
 SKILL_SRC = Path(__file__).parent.parent / "skill.md"
 
+NOTEBOOK_PREFIX = "Zotero: "
+
 
 # ---------------------------------------------------------------------------
 # Zotero helpers
@@ -56,15 +60,8 @@ def get_zotero_client():
     return zotero.Zotero(library_id, library_type, api_key)
 
 
-def list_collections(zot):
-    collections = zot.collections()
-    if not collections:
-        print("No collections found in your Zotero library.")
-        return
-    print(f"\n{'KEY':<12}  NAME")
-    print("-" * 55)
-    for col in sorted(collections, key=lambda c: c["data"]["name"].lower()):
-        print(f"{col['key']:<12}  {col['data']['name']}")
+def get_all_collections(zot):
+    return sorted(zot.collections(), key=lambda c: c["data"]["name"].lower())
 
 
 def find_collection(zot, name):
@@ -74,11 +71,11 @@ def find_collection(zot, name):
     if not matches:
         matches = [c for c in collections if name_lower in c["data"]["name"].lower()]
     if not matches:
-        print(f"Error: No collection matching '{name}' found.")
-        print("Run without arguments to list all collections.")
+        print(f"Error: No Zotero collection matching '{name}' found.")
+        print("Run without arguments to list all collections and notebooks.")
         sys.exit(1)
     if len(matches) > 1:
-        print(f"Ambiguous name '{name}'. Matches:")
+        print(f"Ambiguous name '{name}'. Matching Zotero collections:")
         for m in matches:
             print(f"  {m['key']}  {m['data']['name']}")
         sys.exit(1)
@@ -108,6 +105,75 @@ def get_pdf_attachments(zot, collection_key):
         local_path = data.get("path", "")
         pdfs.append((item["key"], display_title, link_mode, local_path))
     return pdfs
+
+
+# ---------------------------------------------------------------------------
+# NotebookLM helpers
+# ---------------------------------------------------------------------------
+
+def notebooklm(*args):
+    result = subprocess.run(["notebooklm", *args], capture_output=True, text=True)
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+def get_all_notebooks():
+    """Return list of {id, title} dicts from NotebookLM."""
+    rc, out, _ = notebooklm("list", "--json")
+    if rc != 0:
+        return []
+    try:
+        return json.loads(out).get("notebooks", [])
+    except json.JSONDecodeError:
+        return []
+
+
+def find_paired_notebook(col_name, notebooks=None):
+    """Find a NotebookLM notebook named 'Zotero: <col_name>'. Returns notebook dict or None."""
+    if notebooks is None:
+        notebooks = get_all_notebooks()
+    target = (NOTEBOOK_PREFIX + col_name).lower()
+    for nb in notebooks:
+        if nb["title"].lower() == target:
+            return nb
+    return None
+
+
+def get_notebook_source_titles(notebook_id):
+    """Return set of normalised source titles already in a NotebookLM notebook."""
+    rc, out, _ = notebooklm("source", "list", "--json", "--notebook", notebook_id)
+    if rc != 0:
+        return set()
+    try:
+        sources = json.loads(out).get("sources", [])
+        return {_normalise_title(s["title"]) for s in sources}
+    except json.JSONDecodeError:
+        return set()
+
+
+def _normalise_title(title):
+    """Strip extension and normalise whitespace/case for comparison."""
+    t = title.lower().strip()
+    if t.endswith(".pdf"):
+        t = t[:-4]
+    return " ".join(t.split())
+
+
+def create_notebook(col_name):
+    """Create a new NotebookLM notebook named 'Zotero: <col_name>'. Returns notebook id."""
+    notebook_title = NOTEBOOK_PREFIX + col_name
+    print(f"Creating NotebookLM notebook: '{notebook_title}'...")
+    rc, out, err = notebooklm("create", notebook_title, "--json")
+    if rc != 0:
+        print(f"Error creating notebook: {err}")
+        sys.exit(1)
+    try:
+        notebook_id = json.loads(out)["notebook"]["id"]
+        notebooklm("use", notebook_id)
+        print(f"Notebook created: {notebook_id}")
+        return notebook_id
+    except (json.JSONDecodeError, KeyError):
+        print("Notebook created (could not parse ID).")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -185,42 +251,45 @@ def download_pdf(zot, item_key, title, link_mode, local_path, dest_dir, storage_
 
 
 # ---------------------------------------------------------------------------
-# NotebookLM helpers
-# ---------------------------------------------------------------------------
-
-def notebooklm(*args):
-    result = subprocess.run(["notebooklm", *args], capture_output=True, text=True)
-    return result.returncode, result.stdout.strip(), result.stderr.strip()
-
-
-def create_or_use_notebook(notebook_arg, col_name):
-    if notebook_arg:
-        rc, _, err = notebooklm("use", notebook_arg)
-        if rc != 0:
-            print(f"Error: Could not use notebook '{notebook_arg}': {err}")
-            sys.exit(1)
-        print(f"Using existing notebook: {notebook_arg}")
-        return notebook_arg
-
-    notebook_title = f"Zotero: {col_name}"
-    print(f"Creating NotebookLM notebook: '{notebook_title}'...")
-    rc, out, err = notebooklm("create", notebook_title, "--json")
-    if rc != 0:
-        print(f"Error creating notebook: {err}")
-        sys.exit(1)
-    try:
-        notebook_id = json.loads(out)["notebook"]["id"]
-        notebooklm("use", notebook_id)
-        print(f"Notebook created: {notebook_id}")
-        return notebook_id
-    except (json.JSONDecodeError, KeyError):
-        print("Notebook created (could not parse ID).")
-        return None
-
-
-# ---------------------------------------------------------------------------
 # Subcommands
 # ---------------------------------------------------------------------------
+
+def cmd_list(zot):
+    """Show Zotero collections paired with their NotebookLM notebooks."""
+    collections = get_all_collections(zot)
+    notebooks = get_all_notebooks()
+
+    # Index notebooks by normalised title for quick lookup
+    nb_by_title = {nb["title"].lower(): nb for nb in notebooks}
+
+    COL_W, NB_W = 30, 36
+    print(f"\n{'ZOTERO COLLECTION':<{COL_W}}  {'NOTEBOOKLM NOTEBOOK':<{NB_W}}  NOTEBOOK ID")
+    print("-" * (COL_W + NB_W + 40))
+
+    for col in collections:
+        col_name = col["data"]["name"]
+        paired_title = (NOTEBOOK_PREFIX + col_name).lower()
+        nb = nb_by_title.get(paired_title)
+        if nb:
+            nb_display = nb["title"]
+            nb_id = nb["id"][:8] + "..."
+        else:
+            nb_display = "(no notebook yet)"
+            nb_id = ""
+        print(f"{col_name:<{COL_W}}  {nb_display:<{NB_W}}  {nb_id}")
+
+    # Also list notebooks that have no matching Zotero collection
+    paired_titles = {(NOTEBOOK_PREFIX + c["data"]["name"]).lower() for c in collections}
+    orphans = [nb for nb in notebooks if nb["title"].lower() not in paired_titles
+               and nb["title"].lower().startswith(NOTEBOOK_PREFIX.lower())]
+    if orphans:
+        print("\nNotebookLM notebooks with no matching Zotero collection:")
+        for nb in orphans:
+            print(f"  {nb['title']}  ({nb['id'][:8]}...)")
+
+    print(f"\nUsage: zotero-notebooklm \"Collection Name\"")
+    print(f"       zotero-notebooklm \"Collection Name\" --sync   # add new papers only")
+
 
 def cmd_config():
     """Interactively create the global config file."""
@@ -239,7 +308,7 @@ def cmd_config():
         f"ZOTERO_API_KEY={api_key}\n"
         f"ZOTERO_LIBRARY_TYPE={library_type}\n"
     )
-    os.chmod(env_path, 0o600)  # owner read/write only
+    os.chmod(env_path, 0o600)
     print(f"\nCredentials saved to {env_path} (permissions: 600)")
 
 
@@ -247,7 +316,6 @@ def cmd_skill_install():
     """Install the Claude Code skill."""
     if not SKILL_SRC.exists():
         print(f"Error: skill.md not found at {SKILL_SRC}")
-        print("Make sure you installed the package from source.")
         sys.exit(1)
     SKILL_DEST.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(SKILL_SRC, SKILL_DEST)
@@ -256,7 +324,7 @@ def cmd_skill_install():
 
 
 def cmd_export(args, zot, storage_dir):
-    """Export a Zotero collection to NotebookLM."""
+    """Export a Zotero collection to NotebookLM, with optional sync."""
     collection = find_collection(zot, args.collection)
     col_name = collection["data"]["name"]
     col_key = collection["key"]
@@ -267,10 +335,50 @@ def cmd_export(args, zot, storage_dir):
     if not pdfs:
         print("No PDF attachments found in this collection.")
         sys.exit(0)
-    print(f"Found {len(pdfs)} PDF(s).")
+    print(f"Found {len(pdfs)} PDF(s) in Zotero.")
 
-    create_or_use_notebook(args.notebook, col_name)
+    # Resolve target notebook
+    notebook_id = args.notebook
+    existing_titles = set()
 
+    if args.sync or args.notebook:
+        # Try to find paired notebook if no explicit ID given
+        if not notebook_id:
+            notebooks = get_all_notebooks()
+            paired = find_paired_notebook(col_name, notebooks)
+            if paired:
+                notebook_id = paired["id"]
+                print(f"Found paired notebook: '{paired['title']}' ({notebook_id[:8]}...)")
+            else:
+                print(f"No paired notebook found for '{col_name}' — creating a new one.")
+
+        if notebook_id:
+            notebooklm("use", notebook_id)
+            if args.sync:
+                print("Fetching existing sources from NotebookLM...")
+                existing_titles = get_notebook_source_titles(notebook_id)
+                print(f"  {len(existing_titles)} source(s) already in notebook.")
+
+    if not notebook_id:
+        notebook_id = create_notebook(col_name)
+    elif not args.notebook and not args.sync:
+        # notebook_id came from --notebook flag
+        notebooklm("use", notebook_id)
+        print(f"Using notebook: {notebook_id}")
+
+    # Filter out already-present papers in sync mode
+    if args.sync and existing_titles:
+        before = len(pdfs)
+        pdfs = [(k, t, lm, lp) for k, t, lm, lp in pdfs
+                if _normalise_title(sanitize_filename(t)) not in existing_titles]
+        skipped = before - len(pdfs)
+        if skipped:
+            print(f"Skipping {skipped} already-present paper(s).")
+        if not pdfs:
+            print("Nothing new to add — notebook is up to date.")
+            return
+
+    print(f"Uploading {len(pdfs)} PDF(s)...")
     with tempfile.TemporaryDirectory() as tmpdir:
         success, failed = 0, 0
         for item_key, title, link_mode, local_path in pdfs:
@@ -311,14 +419,16 @@ def main():
     # config subcommand
     subparsers.add_parser("config", help="Set up global credentials interactively")
 
-    # export (default, positional)
+    # export / list (default, positional)
     parser.add_argument("collection", nargs="?", help="Zotero collection name (partial match ok)")
-    parser.add_argument("--notebook", help="Add to existing NotebookLM notebook ID")
+    parser.add_argument("--notebook", help="Target a specific NotebookLM notebook ID")
+    parser.add_argument("--sync", action="store_true",
+                        help="Add only new papers to the existing paired notebook")
     parser.add_argument("--zotero-dir", help="Path to Zotero storage folder (overrides auto-detection)")
 
     args = parser.parse_args()
 
-    # Route subcommands
+    # Route named subcommands
     if args.command == "skill":
         if args.skill_command == "install":
             cmd_skill_install()
@@ -340,9 +450,7 @@ def main():
         storage_dir = None
 
     if not args.collection:
-        print("Available Zotero collections:")
-        list_collections(zot)
-        print("\nUsage: zotero-notebooklm \"Collection Name\"")
+        cmd_list(zot)
         return
 
     cmd_export(args, zot, storage_dir)
